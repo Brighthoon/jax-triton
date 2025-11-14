@@ -363,24 +363,53 @@ def get_or_create_triton_kernel(
   # TODO(sharadmv,zhangqiaorjc): handle differently aligned pointers
   # We assume that all arrays are aligned to 16 bytes, and Triton may use this
   # assumption, unless array args are include in the `do_not_specialize` list.
+  # alignments = [16] * len(arg_dtypes)
+  # for i, _, _ in scalar_args:
+  #   alignments[i] = 0
+  # specialize_impl = _triton.native_specialize_impl
+  # is_const = False
+  # do_specialize = True
+  # specialization = [
+  #     specialize_impl(
+  #         backend,
+  #         types.SimpleNamespace(
+  #             data_ptr=lambda: alignment, dtype=arg_dtype.removeprefix("*")
+  #         ),
+  #         is_const,
+  #         do_specialize,
+  #         alignment > 0,
+  #     )
+  #     for arg_dtype, alignment in zip(arg_dtypes, alignments)
+  # ]
   alignments = [16] * len(arg_dtypes)
-  for i, _, _ in scalar_args:
-    alignments[i] = 0
-  specialize_impl = _triton.native_specialize_impl
-  is_const = False
-  do_specialize = True
+  for i, _, value in scalar_args:
+    alignments[i] = value
+  specialize_extra = backend.get_arg_specialization
+  if specialize_impl := getattr(triton.runtime.jit, "specialize_impl", None):
+    # TODO(slebedev): Remove this branch once Triton 3.3 is released.
+    specialize_impl = functools.partial(
+        specialize_impl, specialize_extra=specialize_extra
+    )
+  else:
+    # TODO(rdyro): Remove unnecessary checks with 3.3.0 > release
+    create_specialize_impl = triton.runtime.jit.create_specialize_impl
+    if len(inspect.signature(create_specialize_impl).parameters) == 0:
+      # handle Triton 3.3.0 release
+      specialize_impl = functools.partial(
+          create_specialize_impl(), specialize_extra=specialize_extra
+      )
+    else:
+      # latest Triton head
+      specialize_impl = create_specialize_impl(specialize_extra)
   specialization = [
       specialize_impl(
-          backend,
           types.SimpleNamespace(
               data_ptr=lambda: alignment, dtype=arg_dtype.removeprefix("*")
           ),
-          is_const,
-          do_specialize,
-          alignment > 0,
       )
       for arg_dtype, alignment in zip(arg_dtypes, alignments)
   ]
+  ####################################
   attrs = {
       (i,): backend.parse_attr(attr)
       for i, (_, attr) in enumerate(specialization)
